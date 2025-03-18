@@ -12,6 +12,7 @@ import type {
   TotalSummary
 } from './types';
 import { FINANCIAL_KEYWORDS } from './constants';
+import type { FinancialLabel } from './jigsawApi';
 
 // Enhanced classification mapping with more detailed patterns
 const classificationMap: Record<string, AccountClassification> = {
@@ -344,9 +345,19 @@ export class FinancialProcessor {
     return 'Uncategorized';
   }
 
-  private static detectTables(workbook: WorkSheet): DetectedTable[] {
+  private static detectTables(workbook: WorkSheet, labels: FinancialLabel[]): DetectedTable[] {
     const tables: DetectedTable[] = [];
     const range = utils.decode_range(workbook['!ref'] || 'A1');
+    
+    // Use JigsawStack labels to enhance table detection
+    const labelTypes = new Set(labels.map(l => l.type));
+    const hasRequiredLabels = labelTypes.has('account_description') && 
+                            labelTypes.has('debit') && 
+                            labelTypes.has('credit');
+
+    if (hasRequiredLabels) {
+      this.log('INFO', 'Found required column labels via JigsawStack');
+    }
     
     // Scan through all rows to find potential table headers
     for (let row = range.s.r; row <= range.e.r; row++) {
@@ -386,7 +397,10 @@ export class FinancialProcessor {
           // Check for financial keywords in headers
           const financialKeywordCount = this.countFinancialKeywords(headerCells);
           
-          if (financialKeywordCount >= this.MIN_FINANCIAL_KEYWORDS) {
+          // Boost confidence if JigsawStack found the required labels
+          const confidenceBoost = hasRequiredLabels ? 0.2 : 0;
+          
+          if (financialKeywordCount >= this.MIN_FINANCIAL_KEYWORDS || hasRequiredLabels) {
             const tableType = this.determineTableType(headerCells);
             const tableName = this.generateTableName(tableType, tables.length);
             const tableRange = `${utils.encode_cell({ r: row, c: range.s.c })}:${utils.encode_cell({ r: row + dataRowCount, c: range.e.c })}`;
@@ -397,7 +411,7 @@ export class FinancialProcessor {
               range: tableRange,
               headers: headerCells,
               rowCount: dataRowCount,
-              confidence: this.calculateTableConfidence(headerCells, tableType),
+              confidence: Math.min(1, this.calculateTableConfidence(headerCells, tableType) + confidenceBoost),
               type: tableType
             });
 
@@ -405,7 +419,8 @@ export class FinancialProcessor {
               type: tableType,
               headers: headerCells,
               range: tableRange,
-              rowCount: dataRowCount
+              rowCount: dataRowCount,
+              jigsawLabelsFound: hasRequiredLabels
             });
           }
         }
@@ -415,21 +430,27 @@ export class FinancialProcessor {
     if (tables.length === 0) {
       // If no tables found, try a more lenient approach
       this.log('WARNING', 'No tables detected with strict criteria, attempting lenient detection');
-      return this.detectTablesLenient(workbook);
+      return this.detectTablesLenient(workbook, labels);
     }
 
     return tables;
   }
 
-  private static detectTablesLenient(workbook: WorkSheet): DetectedTable[] {
+  private static detectTablesLenient(workbook: WorkSheet, labels: FinancialLabel[]): DetectedTable[] {
     const range = utils.decode_range(workbook['!ref'] || 'A1');
     const allData = utils.sheet_to_json(workbook, { header: 1 });
+    
+    // Use JigsawStack labels to help with lenient detection
+    const labelTypes = new Set(labels.map(l => l.type));
+    const hasRequiredLabels = labelTypes.has('account_description') && 
+                            labelTypes.has('debit') && 
+                            labelTypes.has('credit');
     
     // Look for any row with multiple cells that could be headers
     for (let row = 0; row < allData.length; row++) {
       const potentialHeaders = allData[row].filter(cell => cell && typeof cell === 'string');
       
-      if (potentialHeaders.length >= 2) {
+      if (potentialHeaders.length >= 2 || hasRequiredLabels) {
         const headerCells = potentialHeaders.map(h => String(h).toLowerCase());
         const tableType = 'UNKNOWN';
         const tableName = `table_${row + 1}`;
@@ -442,13 +463,14 @@ export class FinancialProcessor {
             range: `${utils.encode_cell({ r: row, c: range.s.c })}:${utils.encode_cell({ r: range.e.r, c: range.e.c })}`,
             headers: headerCells,
             rowCount: dataRowCount,
-            confidence: 0.5, // Lower confidence for lenient detection
+            confidence: hasRequiredLabels ? 0.7 : 0.5, // Higher confidence if JigsawStack found labels
             type: tableType
           };
           
           this.log('INFO', `Detected table with lenient criteria: ${tableName}`, {
             headers: headerCells,
-            rowCount: dataRowCount
+            rowCount: dataRowCount,
+            jigsawLabelsFound: hasRequiredLabels
           });
           
           return [table];
@@ -575,7 +597,7 @@ export class FinancialProcessor {
     }
   }
 
-  static async processFile(file: File): Promise<TrialBalance> {
+  static async processFile(file: File, jigsawLabels: FinancialLabel[]): Promise<TrialBalance> {
     this.processingLogs = [];
     this.processedEntries.clear();
     this.unmatchedEntries = [];
@@ -585,7 +607,7 @@ export class FinancialProcessor {
     const workbook = read(buffer);
     const worksheet = workbook.Sheets[workbook.SheetNames[0]];
     
-    const detectedTables = this.detectTables(worksheet);
+    const detectedTables = this.detectTables(worksheet, jigsawLabels);
     
     if (detectedTables.length === 0) {
       this.log('ERROR', 'No financial tables detected in the file');

@@ -2,6 +2,7 @@ import React, { useCallback, useState } from 'react';
 import { Upload, AlertCircle } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { FinancialProcessor } from '../lib/financialProcessor';
+import { extractTextFromExcel } from '../lib/jigsawApi';
 import type { TrialBalance } from '../lib/types';
 
 interface FileUploaderProps {
@@ -45,7 +46,19 @@ export function FileUploader({ onDataProcessed }: FileUploaderProps) {
     setError(null);
 
     try {
-      const trialBalance = await FinancialProcessor.processFile(file);
+      // First, use JigsawStack to analyze the Excel file
+      const buffer = await file.arrayBuffer();
+      console.log('Processing file with JigsawStack...');
+      const labels = await extractTextFromExcel(buffer);
+      
+      console.log('JigsawStack identified labels:', labels);
+
+      if (!labels.length) {
+        throw new Error('No labels identified in the file');
+      }
+
+      // Process the file with enhanced label information
+      const trialBalance = await FinancialProcessor.processFile(file, labels);
       
       // Show warnings for uncertain classifications
       if (trialBalance.uncertainClassifications.length > 0) {
